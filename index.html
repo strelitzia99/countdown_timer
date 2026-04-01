@@ -15,9 +15,11 @@
     color: #fff;
     min-height: 100vh;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     padding: 24px 16px;
+    gap: 16px;
   }
 
   .app {
@@ -42,7 +44,12 @@
     transition: box-shadow 0.2s;
   }
 
+  .card.running {
+    background: #2e3540;
+  }
+
   .card.ringing {
+    background: #383838;
     animation: pulse 0.6s infinite alternate;
   }
 
@@ -118,11 +125,18 @@
   .btn-reset { background: #48484a; color: #fff; }
   .btn-reset:hover { background: #636366; }
 
-  svg { pointer-events: none; }
+  .credit {
+    width: 100%;
+    text-align: center;
+    font-size: 13px;
+    color: #3a3a3a;
+  }
+  .credit a { color: #3a3a3a; }
 </style>
 </head>
 <body>
 <div class="app" id="app"></div>
+<div class="credit">Uicons by <a href="https://www.flaticon.com/uicons">Flaticon</a></div>
 
 <script>
 const N = 4;
@@ -270,6 +284,7 @@ function createTimer() {
     if (t.remaining <= 0) return;
     stopRinging();
     t.running = true;
+    card.classList.add('running');
     btnStart.innerHTML = iconPause();
     btnStart.className = 'btn-start';
     t.interval = setInterval(() => {
@@ -290,6 +305,7 @@ function createTimer() {
 
   function pauseTimer() {
     t.running = false;
+    card.classList.remove('running');
     clearInterval(t.interval);
     stopAlarm();
     t.ringing = false;
@@ -301,6 +317,7 @@ function createTimer() {
   function resetTimer() {
     clearInterval(t.interval);
     t.running = false;
+    card.classList.remove('running');
     stopRinging();
     t.remaining = t.total;
     btnStart.innerHTML = iconPlay();
