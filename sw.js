@@ -1,4 +1,4 @@
-const CACHE = 'timer-v1';
+const CACHE = 'timer-v2';
 const FILES = ['./index.html', './manifest.json'];
 
 self.addEventListener('install', e => {
