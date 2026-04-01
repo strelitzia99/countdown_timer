@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>カウントダウンタイマー</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1c1c1e">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #1c1c1e;
+    color: #fff;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+
+  .app {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .card {
+    background: #2c2c2e;
+    border-radius: 16px;
+    padding: 24px 20px 20px;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    transition: box-shadow 0.2s;
+  }
+
+  .card.ringing {
+    animation: pulse 0.6s infinite alternate;
+  }
+
+  @keyframes pulse {
+    from { box-shadow: 0 0 0 2px #4a7ab5, 0 4px 20px rgba(0,0,0,0.4); }
+    to   { box-shadow: 0 0 0 5px #4a7ab566, 0 4px 20px rgba(0,0,0,0.4); }
+  }
+
+  .bar-wrap {
+    width: 100%;
+    height: 11px;
+    background: #48484a;
+    border-radius: 5.5px;
+    overflow: hidden;
+  }
+  .bar {
+    height: 100%;
+    background: #6b82a0;
+    border-radius: 5.5px;
+    transition: width 0.5s linear;
+    width: 100%;
+  }
+
+  .time-display {
+    font-size: 52px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    user-select: none;
+    line-height: 1;
+    color: #cccccc;
+  }
+  .time-display:hover { opacity: 0.8; }
+
+  .time-edit {
+    font-size: 52px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    font-variant-numeric: tabular-nums;
+    background: none;
+    border: none;
+    border-bottom: 2px solid #6b82a0;
+    color: #fff;
+    width: 160px;
+    text-align: center;
+    outline: none;
+    display: none;
+    line-height: 1;
+    color: #cccccc;
+  }
+
+  .btns { display: flex; gap: 12px; }
+
+  button {
+    border: none;
+    border-radius: 50%;
+    width: 48px;
+    height: 48px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, transform 0.1s;
+  }
+  button:active { transform: scale(0.92); }
+
+  .btn-start { background: #4a7ab5; color: #fff; }
+  .btn-start:hover { background: #5a8ec9; }
+  .btn-start.paused { background: #4a8c5c; }
+  .btn-start.paused:hover { background: #5aa06c; }
+
+  .btn-reset { background: #48484a; color: #fff; }
+  .btn-reset:hover { background: #636366; }
+
+  svg { pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+const N = 4;
+const DEFAULT_SECS = 5 * 60;
+
+// 進捗バー: 1時間以上=100%, 30分=50%, 15分=25%, 0=0% (対数的マッピング)
+// 基準: 60分→100%, 30分→50%, 15分→25%
+// これは remaining/3600 の線形スケール（3600を満タンとし、それ以上はクランプ）
+function calcBarPct(remaining) {
+  // 3600秒(1時間)以上は100%
+  return Math.min(1, remaining / 3600) * 100;
+}
+
+// Audio
+let audioCtx = null;
+function getCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playAlarmOnce(onEnd) {
+  const ctx = getCtx();
+  const vol = 0.6; // 0.4 * 1.5
+  const beep = (freq, start, dur) => {
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = 'sine';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, ctx.currentTime + start);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+    o.start(ctx.currentTime + start);
+    o.stop(ctx.currentTime + start + dur);
+  };
+  beep(880,  0,    0.18);
+  beep(880,  0.22, 0.18);
+  beep(1100, 0.44, 0.30);
+  // 全音終了後にコールバック (0.44+0.30+少し余裕)
+  setTimeout(onEnd, 900);
+}
+
+function pad(n) { return String(n).padStart(2, '0'); }
+
+function secsToDisplay(s) {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${pad(h)}:${pad(m)}`;
+}
+
+function parseInput(val) {
+  val = val.trim().replace(/[^0-9:]/g, '');
+  let h = 0, m = 0;
+  if (val.includes(':')) {
+    const parts = val.split(':');
+    h = parseInt(parts[0]) || 0;
+    m = parseInt(parts[1]) || 0;
+  } else {
+    const n = parseInt(val) || 0;
+    if (val.length <= 2) { m = n; }
+    else { m = n % 100; h = Math.floor(n / 100); }
+  }
+  m = Math.max(0, Math.min(59, m));
+  h = Math.max(0, Math.min(99, h));
+  return h * 3600 + m * 60;
+}
+
+// カーソル位置から hh か mm かを判定
+// "hh:mm" → 0-1が時間部, 3-4が分部
+function getCursorField(input) {
+  const pos = input.selectionStart;
+  return pos <= 2 ? 'h' : 'm';
+}
+
+function createTimer() {
+  const t = {
+    total: DEFAULT_SECS,
+    remaining: DEFAULT_SECS,
+    running: false,
+    interval: null,
+    ringing: false,
+    alarmRunning: false,
+  };
+
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const barWrap = document.createElement('div');
+  barWrap.className = 'bar-wrap';
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  barWrap.appendChild(bar);
+
+  const timeDisplay = document.createElement('div');
+  timeDisplay.className = 'time-display';
+
+  const timeEdit = document.createElement('input');
+  timeEdit.className = 'time-edit';
+  timeEdit.type = 'text';
+
+  const btns = document.createElement('div');
+  btns.className = 'btns';
+
+  const btnStart = document.createElement('button');
+  btnStart.className = 'btn-start';
+  btnStart.title = 'スタート';
+
+  const btnReset = document.createElement('button');
+  btnReset.className = 'btn-reset';
+  btnReset.innerHTML = iconReset();
+  btnReset.title = 'リセット';
+
+  btns.appendChild(btnStart);
+  btns.appendChild(btnReset);
+  card.appendChild(barWrap);
+  card.appendChild(timeDisplay);
+  card.appendChild(timeEdit);
+  card.appendChild(btns);
+
+  function render() {
+    timeDisplay.textContent = secsToDisplay(t.remaining);
+    bar.style.width = calcBarPct(t.remaining) + '%';
+  }
+
+  function stopAlarm() {
+    t.alarmRunning = false;
+  }
+
+  function loopAlarm() {
+    if (!t.alarmRunning) return;
+    playAlarmOnce(() => loopAlarm());
+  }
+
+  function startAlarm() {
+    t.alarmRunning = true;
+    loopAlarm();
+  }
+
+  function stopRinging() {
+    t.ringing = false;
+    t.alarmRunning = false;
+    card.classList.remove('ringing');
+  }
+
+  function startTimer() {
+    if (t.remaining <= 0) return;
+    stopRinging();
+    t.running = true;
+    btnStart.innerHTML = iconPause();
+    btnStart.className = 'btn-start';
+    t.interval = setInterval(() => {
+      if (t.remaining > 0) {
+        t.remaining--;
+        render();
+        if (t.remaining === 0) {
+          clearInterval(t.interval);
+          t.running = false;
+          t.ringing = true;
+          card.classList.add('ringing');
+          btnStart.innerHTML = iconPause();
+          startAlarm();
+        }
+      }
+    }, 1000);
+  }
+
+  function pauseTimer() {
+    t.running = false;
+    clearInterval(t.interval);
+    stopAlarm();
+    t.ringing = false;
+    card.classList.remove('ringing');
+    btnStart.innerHTML = iconPlay();
+    btnStart.className = 'btn-start paused';
+  }
+
+  function resetTimer() {
+    clearInterval(t.interval);
+    t.running = false;
+    stopRinging();
+    t.remaining = t.total;
+    btnStart.innerHTML = iconPlay();
+    btnStart.className = 'btn-start';
+    render();
+  }
+
+  btnStart.addEventListener('click', () => {
+    if (t.ringing) { stopRinging(); btnStart.innerHTML = iconPlay(); btnStart.className = 'btn-start'; return; }
+    if (t.running) pauseTimer(); else startTimer();
+  });
+
+  btnReset.addEventListener('click', resetTimer);
+
+  // 編集モード
+  timeDisplay.addEventListener('click', () => {
+    if (t.running) return;
+    timeDisplay.style.display = 'none';
+    timeEdit.style.display = 'block';
+    timeEdit.value = secsToDisplay(t.remaining);
+    timeEdit.focus();
+    // カーソルを時間部の末尾へ
+    timeEdit.setSelectionRange(2, 2);
+  });
+
+  function commitEdit() {
+    const secs = parseInput(timeEdit.value);
+    t.total = secs > 0 ? secs : DEFAULT_SECS;
+    t.remaining = t.total;
+    timeEdit.style.display = 'none';
+    timeDisplay.style.display = '';
+    render();
+  }
+
+  timeEdit.addEventListener('blur', commitEdit);
+
+  timeEdit.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); timeEdit.blur(); return; }
+    if (e.key === 'Escape') {
+      timeEdit.style.display = 'none';
+      timeDisplay.style.display = '';
+      return;
+    }
+
+    // 上下キーで増減
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const cur = parseInput(timeEdit.value);
+      let h = Math.floor(cur / 3600);
+      let m = Math.floor((cur % 3600) / 60);
+      const field = getCursorField(timeEdit);
+      const delta = e.key === 'ArrowUp' ? 1 : -1;
+
+      if (field === 'h') {
+        h = Math.max(0, Math.min(99, h + delta));
+      } else {
+        m = (m + delta + 60) % 60;
+      }
+
+      const pos = timeEdit.selectionStart;
+      timeEdit.value = `${pad(h)}:${pad(m)}`;
+      timeEdit.setSelectionRange(pos, pos);
+    }
+
+    // 左右キーでフィールド移動
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const pos = e.key === 'ArrowLeft' ? 1 : 4;
+      timeEdit.setSelectionRange(pos, pos);
+    }
+  });
+
+  // クリックでフィールド選択維持
+  timeEdit.addEventListener('click', () => {
+    const pos = timeEdit.selectionStart;
+    if (pos === 2 || pos === 3) timeEdit.setSelectionRange(2, 2);
+  });
+
+  btnStart.innerHTML = iconPlay();
+  render();
+  return card;
+}
+
+function iconPlay() {
+  return `<svg width="22" height="22" viewBox="0 0 24 24" fill="white"><polygon points="6,4 20,12 6,20"/></svg>`;
+}
+function iconPause() {
+  return `<svg width="22" height="22" viewBox="0 0 24 24" fill="white"><rect x="5" y="4" width="4" height="16" rx="1"/><rect x="15" y="4" width="4" height="16" rx="1"/></svg>`;
+}
+function iconReset() {
+  return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-5"/></svg>`;
+}
+
+const app = document.getElementById('app');
+for (let i = 0; i < N; i++) app.appendChild(createTimer());
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js');
+}
+</script>
+</body>
+</html>
